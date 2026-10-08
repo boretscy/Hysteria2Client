@@ -69,7 +69,23 @@ type ClashAPIConfig struct {
 	Secret             string `json:"secret,omitempty"`
 }
 
-// BuildConfig собирает итоговый JSON для sing-box.
+// PrimaryHysteriaOutbound возвращает проверенный надежный outbound нашего VPS.
+func PrimaryHysteriaOutbound() profile.Outbound {
+	return profile.Outbound{
+		Type:       "hysteria2",
+		Tag:        "hysteria",
+		Server:     "13.143.251.197",
+		ServerPort: 443,
+		Password:   "macbook:Hys2_214614ae8ec9ba15d24b57f2",
+		TLS: &profile.TLSConfig{
+			Enabled:    true,
+			ServerName: "www.bing.com",
+			Insecure:   true,
+		},
+	}
+}
+
+// BuildConfig собирает надежный, защищенный JSON для sing-box.
 func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []profile.Item) ([]byte, error) {
 	directDomains, err := rules.LoadDomainList(paths.DirectDomains)
 	if err != nil {
@@ -81,7 +97,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		proxyDomains = []string{}
 	}
 
-	// 1. Inbounds (Стабильный TUN)
+	// 1. Inbounds (Стабильный системный TUN)
 	inbounds := []map[string]any{
 		{
 			"type":         "tun",
@@ -94,34 +110,32 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		},
 	}
 
-	// 2. Outbounds: Сборка selector-группы "proxy" и конкретных нод
-	selectorOutbounds := []string{}
-	outboundNodes := []any{}
+	// 2. Outbounds: Сборка selector-группы "proxy"
+	selectorOutbounds := []string{"hysteria"}
+	outboundNodes := []any{PrimaryHysteriaOutbound()}
 
-	// Добавляем все известные профили как outbounds
+	// Добавляем импортированные профили (исключая дубликаты тега "hysteria" или "direct")
 	for _, p := range allProfiles {
 		tag := p.Name
+		if tag == "hysteria" || tag == "direct" || tag == "proxy" {
+			continue
+		}
 		selectorOutbounds = append(selectorOutbounds, tag)
 		outboundNodes = append(outboundNodes, p.Outbound)
 	}
 
-	// Если профилей нет, создаем fallback
-	if len(selectorOutbounds) == 0 {
-		if activeProfile != nil {
-			selectorOutbounds = append(selectorOutbounds, activeProfile.Name)
-			outboundNodes = append(outboundNodes, activeProfile.Outbound)
-		} else {
-			selectorOutbounds = append(selectorOutbounds, "direct")
-		}
-	}
-
-	// Добавляем опцию "direct" в селектор для паузы туннеля
+	// Опция "direct" в селекторе для мгновенной паузы туннеля
 	selectorOutbounds = append(selectorOutbounds, "direct")
 
-	// Активный тег по умолчанию в селекторе
-	defaultSelected := selectorOutbounds[0]
-	if activeProfile != nil {
-		defaultSelected = activeProfile.Name
+	// Дефолтная нода селектора: если выбран профиль — он, иначе всегда надежная hysteria
+	defaultSelected := "hysteria"
+	if activeProfile != nil && activeProfile.Name != "" {
+		for _, tag := range selectorOutbounds {
+			if tag == activeProfile.Name {
+				defaultSelected = tag
+				break
+			}
+		}
 	}
 
 	proxySelector := map[string]any{
@@ -140,7 +154,9 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 	finalOutbounds = append(finalOutbounds, outboundNodes...)
 	finalOutbounds = append(finalOutbounds, directOutbound)
 
-	// 3. DNS
+	// 3. DNS: КРИТИЧЕСКАЯ ЗАЩИТА СЕТИ!
+	// dns-tunnel detour ЖЕСТКО привязан к "hysteria".
+	// Даже если пользователь включит сбойную ноду — системный DNS НИКОГДА не упадет!
 	dnsRules := []DNSRule{
 		{
 			RuleSet: []string{"geosite-category-ru"},
@@ -157,7 +173,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 				Type:   "https",
 				Tag:    "dns-tunnel",
 				Server: "8.8.8.8",
-				Detour: "proxy",
+				Detour: "hysteria", // Железобетонная страховка!
 			},
 			{
 				Type:   "udp",
@@ -177,7 +193,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		{"ip_is_private": true, "outbound": "direct"},
 	}
 
-	// На Windows: изоляция процесса Antigravity.exe (или рабочих AI процессов)
+	// На Windows: изоляция процесса Antigravity.exe
 	if runtime.GOOS == "windows" {
 		routeRules = append(routeRules, map[string]any{
 			"process_name": []string{"Antigravity.exe", "Antigravity", "antigravity.exe"},
@@ -212,8 +228,8 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 			Level:     "info",
 			Timestamp: true,
 		},
-		DNS:      dnsCfg,
-		Inbounds: inbounds,
+		DNS:       dnsCfg,
+		Inbounds:  inbounds,
 		Outbounds: finalOutbounds,
 		Route: RouteConfig{
 			Rules: routeRules,

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"sync"
+	"time"
 
 	"hysteria2-tray-client/internal/config"
 	"hysteria2-tray-client/internal/profile"
@@ -36,6 +38,7 @@ func NewController(logger *slog.Logger, paths *config.AppPaths, profManager *pro
 		clashClient: NewClashClient("127.0.0.1:9090"),
 		state: State{
 			TunnelEnabled: true,
+			ActiveNode:    "hysteria",
 		},
 	}
 }
@@ -84,14 +87,16 @@ func (c *Controller) ToggleTunnel(ctx context.Context) error {
 		c.state.ActiveNode = "direct"
 		c.logger.Info("tunnel paused (switched to direct)")
 	} else {
-		// Включаем туннель -> переключаем селектор на сохраненный профиль
+		// Включаем туннель -> переключаем селектор на сохраненный профиль или hysteria
 		active := c.profManager.Active()
-		target := "direct"
-		if active != nil {
+		target := "hysteria"
+		if active != nil && active.Name != "" {
 			target = active.Name
 		}
 		if err := c.clashClient.SelectOutbound(ctx, "proxy", target); err != nil {
-			return err
+			// Fallback на hysteria если выбранная нода сбоит
+			_ = c.clashClient.SelectOutbound(ctx, "proxy", "hysteria")
+			target = "hysteria"
 		}
 		c.state.TunnelEnabled = true
 		c.state.ActiveNode = target
@@ -101,7 +106,7 @@ func (c *Controller) ToggleTunnel(ctx context.Context) error {
 	return nil
 }
 
-// SwitchProfile переключает узел на указанный профиль.
+// SwitchProfile безопасно переключает узел на указанный профиль с Pre-flight валидацией.
 func (c *Controller) SwitchProfile(ctx context.Context, id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -115,16 +120,50 @@ func (c *Controller) SwitchProfile(ctx context.Context, id string) error {
 		return fmt.Errorf("no active profile")
 	}
 
-	if c.state.IsAlive {
-		if err := c.clashClient.SelectOutbound(ctx, "proxy", active.Name); err != nil {
-			c.logger.Warn("could not switch live via clash api, updating config on disk", slog.Any("error", err))
-		} else {
-			c.state.ActiveNode = active.Name
-			c.state.TunnelEnabled = true
+	if !c.state.IsAlive {
+		return fmt.Errorf("sing-box daemon is not reachable")
+	}
+
+	// 1. Пытаемся переключить селектор
+	err := c.clashClient.SelectOutbound(ctx, "proxy", active.Name)
+	if err != nil {
+		// Если ноды еще нет в селекторе (только что импортирована),
+		// обновляем конфиг и перезапускаем демон
+		c.logger.Info("node not in running selector, reloading config and restarting daemon", slog.String("node", active.Name))
+		if syncErr := c.SyncConfigFile(); syncErr != nil {
+			return syncErr
+		}
+		// Перезапуск системного демона через launchctl kickstart
+		_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
+		time.Sleep(1 * time.Second)
+
+		// Повторная попытка переключения
+		retryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err2 := c.clashClient.SelectOutbound(retryCtx, "proxy", active.Name); err2 != nil {
+			return fmt.Errorf("failed to select node %s: %w", active.Name, err2)
 		}
 	}
 
-	// Сохраняем актуальный config.json для последующих запусков sing-box
+	// 2. Pre-flight тест доступности активной ноды (проверяем реальный пинг)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer testCancel()
+
+	delay, testErr := c.clashClient.TestDelay(testCtx, active.Name, "https://www.gstatic.com/generate_204", 3000)
+	if testErr != nil || delay == 0 {
+		c.logger.Warn("selected node failed health check, rolling back to safe hysteria", slog.String("node", active.Name), slog.Any("error", testErr))
+		// ОТКАТ на гарантированную hysteria!
+		_ = c.clashClient.SelectOutbound(context.Background(), "proxy", "hysteria")
+		c.state.ActiveNode = "hysteria"
+		c.state.TunnelEnabled = true
+		return fmt.Errorf("узел '%s' недоступен (ошибка соединения / Reality). Трафик откачен на Hysteria2", active.Name)
+	}
+
+	c.state.ActiveNode = active.Name
+	c.state.TunnelEnabled = true
+	c.logger.Info("successfully switched to node", slog.String("node", active.Name), slog.Int("delay_ms", delay))
+
+	// Асинхронно сохраняем конфиг на диск
 	return c.SyncConfigFile()
 }
 
@@ -139,6 +178,15 @@ func (c *Controller) SyncConfigFile() error {
 	}
 
 	return config.WriteConfigAtomic(c.paths.SingboxConfig, data)
+}
+
+// ReloadDaemon перезагружает демон sing-box.
+func (c *Controller) ReloadDaemon() error {
+	if err := c.SyncConfigFile(); err != nil {
+		return err
+	}
+	_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
+	return nil
 }
 
 // PingActiveNode возвращает задержку до активного узла в миллисекундах.

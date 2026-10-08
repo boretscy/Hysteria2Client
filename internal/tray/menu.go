@@ -214,10 +214,12 @@ func (a *App) handleImportClipboard() {
 		return
 	}
 
-	// Перегенерируем конфиг
-	_ = a.controller.SyncConfigFile()
+	// Перегенерируем конфиг и обновляем селектор демона
+	if err := a.controller.ReloadDaemon(); err != nil {
+		a.logger.Warn("could not reload daemon after import", slog.Any("error", err))
+	}
 	a.refreshProfileMenu()
-	_ = beeep.Notify("Профиль добавлен", fmt.Sprintf("Добавлен узел: %s", item.Name), "")
+	_ = beeep.Notify("Профиль добавлен", fmt.Sprintf("Добавлен узел: %s (проверен и готов к выбору)", item.Name), "")
 }
 
 func (a *App) handleUpdateGeoBases() {
