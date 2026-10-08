@@ -1,0 +1,31 @@
+# Binaries and build artifacts
+bin/
+*.exe
+*.dmg
+*.app/
+
+# Local profiles and user rules
+profiles/*.json
+!profiles/.gitkeep
+direct_domains.txt
+proxy_domains.txt
+
+# OS metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor and temporary files
+*.tmp
+*.log
+.idea/
+.vscode/
+
+# Sensitive operational notes
+AGENT_HANDOFF_20261008.md
+ANTIGRAVITY_TUNNEL_ISSUE.md
+FINAL_SUMMARY.md
+HOW_TO_VERIFY_NODE.md
+SUMMARY.md
