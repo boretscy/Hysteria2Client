@@ -97,13 +97,12 @@ func (a *App) refreshProfileMenu() {
 	a.profileItems = make(map[string]*systray.MenuItem)
 
 	profiles := a.profManager.List()
-	active := a.profManager.Active()
-
+	state := a.controller.GetState()
 	for _, p := range profiles {
 		prof := p
 		title := fmt.Sprintf("[%s] %s", prof.Outbound.Type, prof.Name)
 		item := a.profileSubmenu.AddSubMenuItem(title, prof.RawURI)
-		if active != nil && active.ID == prof.ID {
+		if state.TunnelEnabled && (prof.Name == state.ActiveNode || (state.ActiveNode == "hysteria" && prof.Outbound.Type == "hysteria2")) {
 			item.Check()
 		} else {
 			item.Uncheck()
@@ -156,14 +155,16 @@ func (a *App) updateUIState() {
 		a.toggleItem.SetTitle("Туннель: Выключен (Нажмите для включения)")
 	}
 
-	// Обновляем чекбоксы в списке профилей
+	// Обновляем чекбоксы в списке профилей по РЕАЛЬНОМУ активному узлу в sing-box
 	a.mu.Lock()
-	active := a.profManager.Active()
-	for id, item := range a.profileItems {
-		if active != nil && active.ID == id && state.TunnelEnabled {
-			item.Check()
-		} else {
-			item.Uncheck()
+	for _, p := range a.profManager.List() {
+		if item, ok := a.profileItems[p.ID]; ok {
+			// Если имя ноды совпадает с активным узлом селектора sing-box и туннель включен
+			if state.TunnelEnabled && (p.Name == state.ActiveNode || (state.ActiveNode == "hysteria" && p.Outbound.Type == "hysteria2")) {
+				item.Check()
+			} else {
+				item.Uncheck()
+			}
 		}
 	}
 	a.mu.Unlock()
