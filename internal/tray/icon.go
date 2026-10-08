@@ -33,9 +33,9 @@ func GenerateIconData(c color.RGBA) []byte {
 	return buf.Bytes()
 }
 
-// IconActive возвращает зеленую иконку (туннель включен).
+// IconActive возвращает темную/черную иконку (туннель включен).
 func IconActive() []byte {
-	return GenerateIconData(color.RGBA{R: 46, G: 204, B: 113, A: 255})
+	return GenerateIconData(color.RGBA{R: 30, G: 30, B: 30, A: 255})
 }
 
 // IconPaused возвращает серую иконку (пауза / direct).
