@@ -10,6 +10,9 @@ import (
 	"hysteria2-tray-client/internal/rules"
 )
 
+// Имя надежного канонического профиля контура
+const DefaultPrimaryTag = "Hysteria2-Primary"
+
 // SingboxFullConfig представляет структуру полного config.json для sing-box 1.10+.
 type SingboxFullConfig struct {
 	Log          LogConfig              `json:"log"`
@@ -69,11 +72,11 @@ type ClashAPIConfig struct {
 	Secret             string `json:"secret,omitempty"`
 }
 
-// PrimaryHysteriaOutbound возвращает проверенный надежный outbound нашего VPS.
+// PrimaryHysteriaOutbound возвращает канонический outbound нашего боевого VPS.
 func PrimaryHysteriaOutbound() profile.Outbound {
 	return profile.Outbound{
 		Type:       "hysteria2",
-		Tag:        "hysteria",
+		Tag:        DefaultPrimaryTag,
 		Server:     "13.143.251.197",
 		ServerPort: 443,
 		Password:   "macbook:Hys2_214614ae8ec9ba15d24b57f2",
@@ -111,13 +114,13 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 	}
 
 	// 2. Outbounds: Сборка selector-группы "proxy"
-	selectorOutbounds := []string{"hysteria"}
+	selectorOutbounds := []string{DefaultPrimaryTag}
 	outboundNodes := []any{PrimaryHysteriaOutbound()}
 
-	// Добавляем импортированные профили (исключая дубликаты тега "hysteria" или "direct")
+	// Добавляем импортированные профили (исключая дубликаты основного тега и системных слов)
 	for _, p := range allProfiles {
 		tag := p.Name
-		if tag == "hysteria" || tag == "direct" || tag == "proxy" {
+		if tag == DefaultPrimaryTag || tag == "hysteria" || tag == "direct" || tag == "proxy" {
 			continue
 		}
 		selectorOutbounds = append(selectorOutbounds, tag)
@@ -127,8 +130,8 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 	// Опция "direct" в селекторе для мгновенной паузы туннеля
 	selectorOutbounds = append(selectorOutbounds, "direct")
 
-	// Дефолтная нода селектора: если выбран профиль — он, иначе всегда надежная hysteria
-	defaultSelected := "hysteria"
+	// Дефолтная нода селектора: если выбран профиль — он, иначе всегда канонический Hysteria2-Primary
+	defaultSelected := DefaultPrimaryTag
 	if activeProfile != nil && activeProfile.Name != "" {
 		for _, tag := range selectorOutbounds {
 			if tag == activeProfile.Name {
@@ -155,7 +158,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 	finalOutbounds = append(finalOutbounds, directOutbound)
 
 	// 3. DNS: КРИТИЧЕСКАЯ ЗАЩИТА СЕТИ!
-	// dns-tunnel detour ЖЕСТКО привязан к "hysteria".
+	// dns-tunnel detour ЖЕСТКО привязан к "Hysteria2-Primary".
 	// Даже если пользователь включит сбойную ноду — системный DNS НИКОГДА не упадет!
 	dnsRules := []DNSRule{
 		{
@@ -173,7 +176,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 				Type:   "https",
 				Tag:    "dns-tunnel",
 				Server: "8.8.8.8",
-				Detour: "hysteria", // Железобетонная страховка!
+				Detour: DefaultPrimaryTag, // Канонический надежный тег!
 			},
 			{
 				Type:   "udp",

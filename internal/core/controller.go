@@ -21,24 +21,26 @@ type State struct {
 
 // Controller управляет жизненным циклом и командами туннеля.
 type Controller struct {
-	mu          sync.RWMutex
-	logger      *slog.Logger
-	paths       *config.AppPaths
-	profManager *profile.Manager
-	clashClient *ClashClient
-	state       State
+	mu             sync.RWMutex
+	logger         *slog.Logger
+	paths          *config.AppPaths
+	profManager    *profile.Manager
+	clashClient    *ClashClient
+	state          State
+	lastActiveNode string // Запоминает узел перед уходом в паузу
 }
 
 // NewController создает контроллер.
 func NewController(logger *slog.Logger, paths *config.AppPaths, profManager *profile.Manager) *Controller {
 	return &Controller{
-		logger:      logger,
-		paths:       paths,
-		profManager: profManager,
-		clashClient: NewClashClient("127.0.0.1:9090"),
+		logger:         logger,
+		paths:          paths,
+		profManager:    profManager,
+		clashClient:    NewClashClient("127.0.0.1:9090"),
+		lastActiveNode: config.DefaultPrimaryTag,
 		state: State{
 			TunnelEnabled: true,
-			ActiveNode:    "hysteria",
+			ActiveNode:    config.DefaultPrimaryTag,
 		},
 	}
 }
@@ -63,6 +65,9 @@ func (c *Controller) CheckStatus(ctx context.Context) State {
 		if err == nil {
 			c.state.ActiveNode = now
 			c.state.TunnelEnabled = (now != "direct")
+			if now != "direct" {
+				c.lastActiveNode = now
+			}
 		}
 	}
 
@@ -70,6 +75,7 @@ func (c *Controller) CheckStatus(ctx context.Context) State {
 }
 
 // ToggleTunnel включает или выключает туннель (через режим Direct).
+// Не выбирает случайные ноды — строго возвращает последний активный узел.
 func (c *Controller) ToggleTunnel(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -79,7 +85,11 @@ func (c *Controller) ToggleTunnel(ctx context.Context) error {
 	}
 
 	if c.state.TunnelEnabled {
-		// Ставим на паузу -> переключаем селектор в direct
+		// Сохраняем перед паузой текущий узел
+		if c.state.ActiveNode != "" && c.state.ActiveNode != "direct" {
+			c.lastActiveNode = c.state.ActiveNode
+		}
+		// Переключаем селектор в direct
 		if err := c.clashClient.SelectOutbound(ctx, "proxy", "direct"); err != nil {
 			return err
 		}
@@ -87,26 +97,31 @@ func (c *Controller) ToggleTunnel(ctx context.Context) error {
 		c.state.ActiveNode = "direct"
 		c.logger.Info("tunnel paused (switched to direct)")
 	} else {
-		// Включаем туннель -> переключаем селектор на сохраненный профиль или hysteria
-		active := c.profManager.Active()
-		target := "hysteria"
-		if active != nil && active.Name != "" {
-			target = active.Name
+		// Возобновляем туннель строго на сохраненный lastActiveNode (или Hysteria2-Primary)
+		target := c.lastActiveNode
+		if target == "" || target == "direct" {
+			target = config.DefaultPrimaryTag
 		}
+
 		if err := c.clashClient.SelectOutbound(ctx, "proxy", target); err != nil {
-			// Fallback на hysteria если выбранная нода сбоит
-			_ = c.clashClient.SelectOutbound(ctx, "proxy", "hysteria")
-			target = "hysteria"
+			// Если сохраненный узел по какой-то причине отсутствует в селекторе — только тогда fallback на Primary
+			c.logger.Warn("target node unavailable, falling back to default primary", slog.String("target", target), slog.Any("error", err))
+			if errFallback := c.clashClient.SelectOutbound(ctx, "proxy", config.DefaultPrimaryTag); errFallback != nil {
+				return errFallback
+			}
+			target = config.DefaultPrimaryTag
 		}
 		c.state.TunnelEnabled = true
 		c.state.ActiveNode = target
+		c.lastActiveNode = target
 		c.logger.Info("tunnel resumed", slog.String("node", target))
 	}
 
 	return nil
 }
 
-// SwitchProfile безопасно переключает узел на указанный профиль с Pre-flight валидацией.
+// SwitchProfile переключает узел строго по явному выбору пользователя.
+// БЕЗ автоматических откатов и блокирующих проверок.
 func (c *Controller) SwitchProfile(ctx context.Context, id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -124,20 +139,19 @@ func (c *Controller) SwitchProfile(ctx context.Context, id string) error {
 		return fmt.Errorf("sing-box daemon is not reachable")
 	}
 
-	// 1. Пытаемся переключить селектор
+	// Переключаем селектор в ядре sing-box
 	err := c.clashClient.SelectOutbound(ctx, "proxy", active.Name)
 	if err != nil {
-		// Если ноды еще нет в селекторе (только что импортирована),
-		// обновляем конфиг и перезапускаем демон
-		c.logger.Info("node not in running selector, reloading config and restarting daemon", slog.String("node", active.Name))
+		// Если ноды еще нет в селекторе ядра (только что добавлена),
+		// сохраняем конфигурацию и делаем перезапуск демона
+		c.logger.Info("node not in running selector, reloading daemon", slog.String("node", active.Name))
 		if syncErr := c.SyncConfigFile(); syncErr != nil {
 			return syncErr
 		}
-		// Перезапуск системного демона через launchctl kickstart
 		_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
 		time.Sleep(1 * time.Second)
 
-		// Повторная попытка переключения
+		// Повторяем выбор
 		retryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err2 := c.clashClient.SelectOutbound(retryCtx, "proxy", active.Name); err2 != nil {
@@ -145,26 +159,33 @@ func (c *Controller) SwitchProfile(ctx context.Context, id string) error {
 		}
 	}
 
-	// 2. Pre-flight тест доступности активной ноды (проверяем реальный пинг)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer testCancel()
-
-	delay, testErr := c.clashClient.TestDelay(testCtx, active.Name, "https://www.gstatic.com/generate_204", 3000)
-	if testErr != nil || delay == 0 {
-		c.logger.Warn("selected node failed health check, rolling back to safe hysteria", slog.String("node", active.Name), slog.Any("error", testErr))
-		// ОТКАТ на гарантированную hysteria!
-		_ = c.clashClient.SelectOutbound(context.Background(), "proxy", "hysteria")
-		c.state.ActiveNode = "hysteria"
-		c.state.TunnelEnabled = true
-		return fmt.Errorf("узел '%s' недоступен (ошибка соединения / Reality). Трафик откачен на Hysteria2", active.Name)
-	}
-
+	// Фиксируем успешный выбор пользователя
 	c.state.ActiveNode = active.Name
 	c.state.TunnelEnabled = true
-	c.logger.Info("successfully switched to node", slog.String("node", active.Name), slog.Int("delay_ms", delay))
+	c.lastActiveNode = active.Name
+	c.logger.Info("user selected node switched successfully", slog.String("node", active.Name))
 
 	// Асинхронно сохраняем конфиг на диск
 	return c.SyncConfigFile()
+}
+
+// SafeExit гарантирует безопасное состояние туннеля при выходе из GUI клиента.
+// Если туннель был на паузе ("direct"), возвращает рабочий туннель, чтобы машина не осталась без защиты.
+func (c *Controller) SafeExit() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.state.IsAlive {
+		return
+	}
+
+	// Если пользователь выходил при выключенном туннеле — возвращаем Hysteria2-Primary
+	if !c.state.TunnelEnabled || c.state.ActiveNode == "direct" {
+		c.logger.Info("safe exit: ensuring tunnel is active on default primary before quitting")
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = c.clashClient.SelectOutbound(ctx, "proxy", config.DefaultPrimaryTag)
+	}
 }
 
 // SyncConfigFile генерирует и перезаписывает singbox config.json со всеми профилями.
@@ -200,5 +221,5 @@ func (c *Controller) PingActiveNode(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("no proxy node active")
 	}
 
-	return c.clashClient.TestDelay(ctx, node, "", 4000)
+	return c.clashClient.TestDelay(ctx, node, "", 10000)
 }

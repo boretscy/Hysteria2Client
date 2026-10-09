@@ -83,7 +83,9 @@ func (a *App) onReady() {
 }
 
 func (a *App) onExit() {
-	a.logger.Info("systray exited")
+	a.logger.Info("systray exiting, performing safe exit cleanup...")
+	a.controller.SafeExit()
+	a.logger.Info("systray exited safely")
 }
 
 func (a *App) refreshProfileMenu() {
@@ -102,24 +104,29 @@ func (a *App) refreshProfileMenu() {
 		prof := p
 		title := fmt.Sprintf("[%s] %s", prof.Outbound.Type, prof.Name)
 		item := a.profileSubmenu.AddSubMenuItem(title, prof.RawURI)
-		if state.TunnelEnabled && (prof.Name == state.ActiveNode || (state.ActiveNode == "hysteria" && prof.Outbound.Type == "hysteria2")) {
+		if state.TunnelEnabled && prof.Name == state.ActiveNode {
 			item.Check()
 		} else {
 			item.Uncheck()
 		}
 		a.profileItems[prof.ID] = item
 
-		go func(id string, menuItem *systray.MenuItem) {
+		go func(pItem profile.Item, menuItem *systray.MenuItem) {
 			for range menuItem.ClickedCh {
+				a.logger.Info("user clicked profile in menu", slog.String("id", pItem.ID), slog.String("name", pItem.Name))
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := a.controller.SwitchProfile(ctx, id); err != nil {
+				err := a.controller.SwitchProfile(ctx, pItem.ID)
+				if err != nil {
+					a.logger.Warn("switch profile failed", slog.String("name", pItem.Name), slog.Any("error", err))
 					_ = beeep.Alert("Ошибка переключения", err.Error(), "")
 				} else {
+					a.logger.Info("switch profile succeeded", slog.String("name", pItem.Name))
+					_ = beeep.Notify("Профиль переключен", fmt.Sprintf("Активен: %s", pItem.Name), "")
 					a.updateUIState()
 				}
 				cancel()
 			}
-		}(prof.ID, item)
+		}(prof, item)
 	}
 }
 
@@ -159,8 +166,7 @@ func (a *App) updateUIState() {
 	a.mu.Lock()
 	for _, p := range a.profManager.List() {
 		if item, ok := a.profileItems[p.ID]; ok {
-			// Если имя ноды совпадает с активным узлом селектора sing-box и туннель включен
-			if state.TunnelEnabled && (p.Name == state.ActiveNode || (state.ActiveNode == "hysteria" && p.Outbound.Type == "hysteria2")) {
+			if state.TunnelEnabled && p.Name == state.ActiveNode {
 				item.Check()
 			} else {
 				item.Uncheck()
