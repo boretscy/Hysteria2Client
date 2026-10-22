@@ -32,11 +32,12 @@ type Controller struct {
 
 // NewController создает контроллер.
 func NewController(logger *slog.Logger, paths *config.AppPaths, profManager *profile.Manager) *Controller {
+	secret, _ := paths.GetOrCreateClashSecret()
 	return &Controller{
 		logger:         logger,
 		paths:          paths,
 		profManager:    profManager,
-		clashClient:    NewClashClient("127.0.0.1:9090"),
+		clashClient:    NewClashClient("127.0.0.1:9090", secret),
 		lastActiveNode: config.DefaultPrimaryTag,
 		state: State{
 			TunnelEnabled: true,

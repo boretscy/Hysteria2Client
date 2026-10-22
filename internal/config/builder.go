@@ -143,7 +143,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		"outbounds": serverTags,
 		"url":       "http://www.gstatic.com/generate_204",
 		"interval":  "1m",
-		"tolerance": 50,
+		"tolerance": 100,
 	}
 
 	// Сборка селектора: сначала "auto", затем конкретные узлы, затем "direct" (пауза)
@@ -220,6 +220,13 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		{"action": "sniff"},
 		{"protocol": "dns", "action": "hijack-dns"},
 		{"ip_is_private": true, "outbound": "direct"},
+		// Защита от утечки открытого DoH на паузе:
+		// DoH запросы к Google DNS блокируются при попытке уйти напрямую (вне proxy)
+		{
+			"ip_cidr":  []string{"8.8.8.8/32", "8.8.4.4/32"},
+			"outbound": "direct",
+			"action":   "reject",
+		},
 	}
 
 	// На Windows: изоляция процесса Antigravity.exe
@@ -264,6 +271,8 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		map[string]any{"rule_set": []string{"geoip-ru"}, "outbound": "direct"},
 	)
 
+	clashSecret, _ := paths.GetOrCreateClashSecret()
+
 	fullCfg := SingboxFullConfig{
 		Log: LogConfig{
 			Level:     "info",
@@ -298,6 +307,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		Experimental: &ExperimentalConfig{
 			ClashAPI: &ClashAPIConfig{
 				ExternalController: "127.0.0.1:9090",
+				Secret:             clashSecret,
 			},
 		},
 	}

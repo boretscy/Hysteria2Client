@@ -51,7 +51,7 @@ func TestBuildConfig(t *testing.T) {
 		t.Fatalf("Unmarshal generated config failed: %v", err)
 	}
 
-	// Проверяем наличие experimental.clash_api
+	// Проверяем наличие experimental.clash_api и secret
 	exp, ok := parsed["experimental"].(map[string]any)
 	if !ok {
 		t.Fatalf("experimental section missing")
@@ -59,6 +59,9 @@ func TestBuildConfig(t *testing.T) {
 	clash, ok := exp["clash_api"].(map[string]any)
 	if !ok || clash["external_controller"] != "127.0.0.1:9090" {
 		t.Errorf("clash_api external_controller mismatch: %v", clash)
+	}
+	if clash["secret"] == "" {
+		t.Errorf("expected non-empty clash_api secret")
 	}
 
 	// Проверяем наличие TUN inbound
@@ -106,6 +109,9 @@ func TestBuildConfig(t *testing.T) {
 	autoOutbound := outbounds[1].(map[string]any)
 	if autoOutbound["type"] != "urltest" || autoOutbound["tag"] != "auto" {
 		t.Errorf("invalid auto urltest outbound: %v", autoOutbound)
+	}
+	if autoOutbound["tolerance"] != float64(100) {
+		t.Errorf("expected tolerance=100, got %v", autoOutbound["tolerance"])
 	}
 
 	// Проверяем корректность IP-маршрутов в route

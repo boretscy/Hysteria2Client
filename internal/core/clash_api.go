@@ -12,6 +12,7 @@ import (
 // ClashClient взаимодействует с локальным REST API sing-box (Clash API).
 type ClashClient struct {
 	baseURL    string
+	secret     string
 	httpClient *http.Client
 }
 
@@ -34,13 +35,20 @@ type ProxyDetail struct {
 	} `json:"history"`
 }
 
-// NewClashClient создает клиент к Clash API на указанном адресе (например, 127.0.0.1:9090).
-func NewClashClient(addr string) *ClashClient {
+// NewClashClient создает клиент к Clash API на указанном адресе (например, 127.0.0.1:9090) с секретом.
+func NewClashClient(addr string, secret string) *ClashClient {
 	return &ClashClient{
 		baseURL: fmt.Sprintf("http://%s", addr),
+		secret:  secret,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
+	}
+}
+
+func (c *ClashClient) setAuthHeader(req *http.Request) {
+	if c.secret != "" {
+		req.Header.Set("Authorization", "Bearer "+c.secret)
 	}
 }
 
@@ -50,6 +58,7 @@ func (c *ClashClient) IsAlive(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return false
@@ -64,6 +73,7 @@ func (c *ClashClient) GetActiveOutbound(ctx context.Context, selectorTag string)
 	if err != nil {
 		return "", err
 	}
+	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("clash api request failed: %w", err)
@@ -95,6 +105,7 @@ func (c *ClashClient) SelectOutbound(ctx context.Context, selectorTag, nodeName 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -118,6 +129,7 @@ func (c *ClashClient) TestDelay(ctx context.Context, nodeName string, testURL st
 	if err != nil {
 		return 0, err
 	}
+	c.setAuthHeader(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
