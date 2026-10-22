@@ -2,35 +2,53 @@ package rules
 
 import (
 	"bufio"
+	"net"
 	"os"
 	"strings"
 )
 
-// LoadDomainList читает домены из текстового файла, игнорируя комментарии (#) и пустые строки.
-func LoadDomainList(filePath string) ([]string, error) {
+// LoadDomainList читает домены и IP-адреса из текстового файла, игнорируя комментарии (#) и пустые строки.
+// Разделяет записи на доменные имена (domains) и IP/CIDR подсети (ips).
+func LoadDomainList(filePath string) (domains []string, ips []string, err error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []string{}, nil
+			return []string{}, []string{}, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 
-	var domains []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
+		// Проверяем, является ли запись IP или CIDR
+		cleanIP := line
+		if strings.Contains(line, "/") {
+			if _, _, errCIDR := net.ParseCIDR(line); errCIDR == nil {
+				ips = append(ips, line)
+				continue
+			}
+		} else if parsedIP := net.ParseIP(cleanIP); parsedIP != nil {
+			if parsedIP.To4() != nil {
+				ips = append(ips, cleanIP+"/32")
+			} else {
+				ips = append(ips, cleanIP+"/128")
+			}
+			continue
+		}
+
 		domains = append(domains, line)
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return domains, nil
+	return domains, ips, nil
 }
 
 // EnsureDefaultRuleFiles создает заготовки файлов исключений, если они еще не существуют.

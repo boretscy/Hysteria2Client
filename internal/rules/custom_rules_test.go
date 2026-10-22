@@ -20,24 +20,36 @@ yandex.ru
 
 # Пустые строки и еще коммент
 gosuslugi.ru
+10.7.7.182
+192.168.1.0/24
 `
 	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		t.Fatalf("writing test file: %v", err)
 	}
 
-	domains, err := rules.LoadDomainList(filePath)
+	domains, ips, err := rules.LoadDomainList(filePath)
 	if err != nil {
 		t.Fatalf("LoadDomainList error: %v", err)
 	}
 
-	expected := []string{"yandex.ru", "sber.ru", "gosuslugi.ru"}
-	if len(domains) != len(expected) {
-		t.Fatalf("expected %d domains, got %d", len(expected), len(domains))
+	expectedDomains := []string{"yandex.ru", "sber.ru", "gosuslugi.ru"}
+	if len(domains) != len(expectedDomains) {
+		t.Fatalf("expected %d domains, got %d", len(expectedDomains), len(domains))
 	}
 
 	for i, d := range domains {
-		if d != expected[i] {
-			t.Errorf("domain[%d] = %s, want %s", i, d, expected[i])
+		if d != expectedDomains[i] {
+			t.Errorf("domain[%d] = %s, want %s", i, d, expectedDomains[i])
+		}
+	}
+
+	expectedIPs := []string{"10.7.7.182/32", "192.168.1.0/24"}
+	if len(ips) != len(expectedIPs) {
+		t.Fatalf("expected %d ips, got %d: %v", len(expectedIPs), len(ips), ips)
+	}
+	for i, ip := range ips {
+		if ip != expectedIPs[i] {
+			t.Errorf("ip[%d] = %s, want %s", i, ip, expectedIPs[i])
 		}
 	}
 }

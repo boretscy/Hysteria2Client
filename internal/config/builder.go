@@ -11,7 +11,11 @@ import (
 )
 
 // Имя надежного канонического профиля контура
-const DefaultPrimaryTag = "Hysteria2-Primary"
+const (
+	DefaultPrimaryTag = "Hysteria2-Primary"
+	AutoFailoverTag   = "⚡️ Авто (URL-тест)"
+	AutoOutboundTag   = "auto"
+)
 
 // SingboxFullConfig представляет структуру полного config.json для sing-box 1.10+.
 type SingboxFullConfig struct {
@@ -33,6 +37,7 @@ type DNSConfig struct {
 	Rules    []DNSRule   `json:"rules"`
 	Final    string      `json:"final"`
 	Strategy string      `json:"strategy"`
+	Timeout  string      `json:"timeout,omitempty"`
 }
 
 type DNSServer struct {
@@ -45,6 +50,7 @@ type DNSServer struct {
 type DNSRule struct {
 	RuleSet []string `json:"rule_set,omitempty"`
 	Domain  []string `json:"domain,omitempty"`
+	IPCIDR  []string `json:"ip_cidr,omitempty"`
 	Server  string   `json:"server"`
 }
 
@@ -90,14 +96,16 @@ func PrimaryHysteriaOutbound() profile.Outbound {
 
 // BuildConfig собирает надежный, защищенный JSON для sing-box.
 func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []profile.Item) ([]byte, error) {
-	directDomains, err := rules.LoadDomainList(paths.DirectDomains)
+	directDomains, directIPs, err := rules.LoadDomainList(paths.DirectDomains)
 	if err != nil {
 		directDomains = []string{}
+		directIPs = []string{}
 	}
 
-	proxyDomains, err := rules.LoadDomainList(paths.ProxyDomains)
+	proxyDomains, proxyIPs, err := rules.LoadDomainList(paths.ProxyDomains)
 	if err != nil {
 		proxyDomains = []string{}
+		proxyIPs = []string{}
 	}
 
 	// 1. Inbounds (Стабильный системный TUN)
@@ -113,25 +121,38 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		},
 	}
 
-	// 2. Outbounds: Сборка selector-группы "proxy"
-	selectorOutbounds := []string{DefaultPrimaryTag}
+	// 2. Outbounds: Сборка auto (urltest) и selector-группы "proxy"
+	// Добавляем доступные узлы прокси
+	var serverTags []string
+	serverTags = append(serverTags, DefaultPrimaryTag)
 	outboundNodes := []any{PrimaryHysteriaOutbound()}
 
-	// Добавляем импортированные профили (исключая дубликаты основного тега и системных слов)
 	for _, p := range allProfiles {
 		tag := p.Name
-		if tag == DefaultPrimaryTag || tag == "hysteria" || tag == "direct" || tag == "proxy" {
+		if tag == DefaultPrimaryTag || tag == "hysteria" || tag == "direct" || tag == "proxy" || tag == AutoOutboundTag {
 			continue
 		}
-		selectorOutbounds = append(selectorOutbounds, tag)
+		serverTags = append(serverTags, tag)
 		outboundNodes = append(outboundNodes, p.Outbound)
 	}
 
-	// Опция "direct" в селекторе для мгновенной паузы туннеля
+	// Создаем группу автоматического выбора urltest ("auto")
+	urltestOutbound := map[string]any{
+		"type":      "urltest",
+		"tag":       AutoOutboundTag,
+		"outbounds": serverTags,
+		"url":       "http://www.gstatic.com/generate_204",
+		"interval":  "1m",
+		"tolerance": 50,
+	}
+
+	// Сборка селектора: сначала "auto", затем конкретные узлы, затем "direct" (пауза)
+	selectorOutbounds := []string{AutoOutboundTag}
+	selectorOutbounds = append(selectorOutbounds, serverTags...)
 	selectorOutbounds = append(selectorOutbounds, "direct")
 
-	// Дефолтная нода селектора: если выбран профиль — он, иначе всегда канонический Hysteria2-Primary
-	defaultSelected := DefaultPrimaryTag
+	// Дефолтная нода селектора: если пользователь явно выбрал профиль — ставим его, иначе по умолчанию "auto"
+	defaultSelected := AutoOutboundTag
 	if activeProfile != nil && activeProfile.Name != "" {
 		for _, tag := range selectorOutbounds {
 			if tag == activeProfile.Name {
@@ -153,13 +174,14 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		"tag":  "direct",
 	}
 
-	finalOutbounds := []any{proxySelector}
+	finalOutbounds := []any{proxySelector, urltestOutbound}
 	finalOutbounds = append(finalOutbounds, outboundNodes...)
 	finalOutbounds = append(finalOutbounds, directOutbound)
 
 	// 3. DNS: КРИТИЧЕСКАЯ ЗАЩИТА СЕТИ!
-	// dns-tunnel detour ЖЕСТКО привязан к "Hysteria2-Primary".
-	// Даже если пользователь включит сбойную ноду — системный DNS НИКОГДА не упадет!
+	// dns-tunnel detour привязан к селектору "proxy".
+	// Если туннель на паузе ("direct") или переключен на другой профиль,
+	// DNS-трафик корректно следует за выбранным узлом.
 	dnsRules := []DNSRule{
 		{
 			RuleSet: []string{"geosite-category-ru"},
@@ -169,6 +191,9 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 	if len(directDomains) > 0 {
 		dnsRules = append([]DNSRule{{Domain: directDomains, Server: "dns-direct"}}, dnsRules...)
 	}
+	if len(directIPs) > 0 {
+		dnsRules = append([]DNSRule{{IPCIDR: directIPs, Server: "dns-direct"}}, dnsRules...)
+	}
 
 	dnsCfg := DNSConfig{
 		Servers: []DNSServer{
@@ -176,7 +201,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 				Type:   "https",
 				Tag:    "dns-tunnel",
 				Server: "8.8.8.8",
-				Detour: DefaultPrimaryTag, // Канонический надежный тег!
+				Detour: "proxy",
 			},
 			{
 				Type:   "udp",
@@ -187,6 +212,7 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		Rules:    dnsRules,
 		Final:    "dns-tunnel",
 		Strategy: "prefer_ipv4",
+		Timeout:  "3s",
 	}
 
 	// 4. Route Rules
@@ -204,19 +230,31 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		})
 	}
 
-	// Пользовательские Proxy домены
+	// Пользовательские Proxy домены и IP
 	if len(proxyDomains) > 0 {
 		routeRules = append(routeRules, map[string]any{
 			"domain_suffix": proxyDomains,
 			"outbound":      "proxy",
 		})
 	}
+	if len(proxyIPs) > 0 {
+		routeRules = append(routeRules, map[string]any{
+			"ip_cidr":  proxyIPs,
+			"outbound": "proxy",
+		})
+	}
 
-	// Пользовательские Direct домены
+	// Пользовательские Direct домены и IP (включая одиночные IP вроде 10.7.7.182/32)
 	if len(directDomains) > 0 {
 		routeRules = append(routeRules, map[string]any{
 			"domain_suffix": directDomains,
 			"outbound":      "direct",
+		})
+	}
+	if len(directIPs) > 0 {
+		routeRules = append(routeRules, map[string]any{
+			"ip_cidr":  directIPs,
+			"outbound": "direct",
 		})
 	}
 

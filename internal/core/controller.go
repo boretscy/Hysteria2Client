@@ -120,6 +120,38 @@ func (c *Controller) ToggleTunnel(ctx context.Context) error {
 	return nil
 }
 
+// SwitchToAuto переключает селектор proxy в режим auto (urltest failover).
+func (c *Controller) SwitchToAuto(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.state.IsAlive {
+		return fmt.Errorf("sing-box daemon is not reachable")
+	}
+
+	if err := c.clashClient.SelectOutbound(ctx, "proxy", "auto"); err != nil {
+		c.logger.Info("auto outbound not in running selector, reloading daemon")
+		if syncErr := c.SyncConfigFile(); syncErr != nil {
+			return syncErr
+		}
+		_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
+		time.Sleep(1 * time.Second)
+
+		retryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err2 := c.clashClient.SelectOutbound(retryCtx, "proxy", "auto"); err2 != nil {
+			return fmt.Errorf("failed to select auto: %w", err2)
+		}
+	}
+
+	c.state.ActiveNode = "auto"
+	c.state.TunnelEnabled = true
+	c.lastActiveNode = "auto"
+	c.logger.Info("switched to auto failover mode")
+
+	return c.SyncConfigFile()
+}
+
 // SwitchProfile переключает узел строго по явному выбору пользователя.
 // БЕЗ автоматических откатов и блокирующих проверок.
 func (c *Controller) SwitchProfile(ctx context.Context, id string) error {

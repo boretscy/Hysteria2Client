@@ -29,6 +29,7 @@ type App struct {
 	statusItem     *systray.MenuItem
 	toggleItem     *systray.MenuItem
 	profileSubmenu *systray.MenuItem
+	autoFailoverIt *systray.MenuItem
 	profileItems   map[string]*systray.MenuItem
 	importItem     *systray.MenuItem
 	updateGeoItem  *systray.MenuItem
@@ -64,7 +65,25 @@ func (a *App) onReady() {
 	systray.AddSeparator()
 
 	a.profileSubmenu = systray.AddMenuItem("Профили подключения", "Выбор активного сервера")
+	a.autoFailoverIt = a.profileSubmenu.AddSubMenuItem("⚡️ Авто (URL-тест failover)", "Автоматический выбор наилучшего узла")
 	a.refreshProfileMenu()
+
+	go func() {
+		for range a.autoFailoverIt.ClickedCh {
+			a.logger.Info("user selected auto failover node")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := a.controller.SwitchToAuto(ctx)
+			cancel()
+			if err != nil {
+				a.logger.Warn("switch to auto failed", slog.Any("error", err))
+				_ = beeep.Alert("Ошибка переключения", err.Error(), "")
+			} else {
+				a.logger.Info("switched to auto failover successfully")
+				_ = beeep.Notify("Режим переключен", "Включен автоматический выбор узла (Failover)", "")
+				a.updateUIState()
+			}
+		}
+	}()
 
 	a.importItem = systray.AddMenuItem("Импорт профиля из буфера...", "Добавить ссылку vless:// или hysteria2://")
 	systray.AddSeparator()
@@ -164,6 +183,13 @@ func (a *App) updateUIState() {
 
 	// Обновляем чекбоксы в списке профилей по РЕАЛЬНОМУ активному узлу в sing-box
 	a.mu.Lock()
+	if a.autoFailoverIt != nil {
+		if state.TunnelEnabled && state.ActiveNode == "auto" {
+			a.autoFailoverIt.Check()
+		} else {
+			a.autoFailoverIt.Uncheck()
+		}
+	}
 	for _, p := range a.profManager.List() {
 		if item, ok := a.profileItems[p.ID]; ok {
 			if state.TunnelEnabled && p.Name == state.ActiveNode {
