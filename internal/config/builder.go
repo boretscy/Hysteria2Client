@@ -94,6 +94,38 @@ func PrimaryHysteriaOutbound() profile.Outbound {
 	}
 }
 
+// StandbySpainGRPCOutbound возвращает резервный gRPC Reality узел (ручной выбор, не входит в urltest auto).
+func StandbySpainGRPCOutbound() map[string]any {
+	return map[string]any{
+		"type":        "vless",
+		"tag":         "Spain-Madrid-VLESS-gRPC",
+		"server":      "185.121.15.89",
+		"server_port": 8443,
+		"uuid":        "8744f5d1-72c7-4498-8731-a5c159155532",
+		"flow":        "",
+		"tls": map[string]any{
+			"enabled":     true,
+			"server_name": "gateway.icloud.com",
+			"utls": map[string]any{
+				"enabled":     true,
+				"fingerprint": "chrome",
+			},
+			"reality": map[string]any{
+				"enabled":    true,
+				"public_key": "PtcKU30lv0MmFnlB3CxXypTJ3aK8ICpAEXHaT6BIQCE",
+				"short_id":   "6b1a5acbef6591db",
+			},
+		},
+		"transport": map[string]any{
+			"type":                  "grpc",
+			"service_name":          "grpc-vpn-tunnel",
+			"idle_timeout":          "15s",
+			"ping_timeout":          "15s",
+			"permit_without_stream": true,
+		},
+	}
+}
+
 // BuildConfig собирает надежный, защищенный JSON для sing-box.
 func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []profile.Item) ([]byte, error) {
 	directDomains, directIPs, err := rules.LoadDomainList(paths.DirectDomains)
@@ -109,17 +141,31 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 	}
 
 	// 1. Inbounds (Стабильный системный TUN)
-	inbounds := []map[string]any{
-		{
-			"type":         "tun",
-			"tag":          "tun-in",
-			"address":      []string{"172.19.0.1/30"},
-			"mtu":          1400,
-			"auto_route":   true,
-			"strict_route": true,
-			"stack":        "system",
-		},
+	tunStack := "system"
+	tunStrictRoute := true
+	tunInterfaceName := ""
+
+	if runtime.GOOS == "windows" {
+		// На Windows: стек mixed (TCP через gVisor + UDP напрямую через Wintun)
+		// strict_route: false исключает блокировку локального broadcast/DHCP
+		tunStack = "mixed"
+		tunStrictRoute = false
+		tunInterfaceName = "SingBoxTUN"
 	}
+
+	tunInbound := map[string]any{
+		"type":         "tun",
+		"tag":          "tun-in",
+		"address":      []string{"172.19.0.1/30"},
+		"mtu":          1400,
+		"auto_route":   true,
+		"strict_route": tunStrictRoute,
+		"stack":        tunStack,
+	}
+	if tunInterfaceName != "" {
+		tunInbound["interface_name"] = tunInterfaceName
+	}
+	inbounds := []map[string]any{tunInbound}
 
 	// 2. Outbounds: Сборка auto (urltest) и selector-группы "proxy"
 	// Добавляем доступные узлы прокси
@@ -129,12 +175,19 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 
 	for _, p := range allProfiles {
 		tag := p.Name
-		if tag == DefaultPrimaryTag || tag == "hysteria" || tag == "direct" || tag == "proxy" || tag == AutoOutboundTag {
+		if tag == DefaultPrimaryTag || tag == "hysteria" || tag == "direct" || tag == "proxy" || tag == AutoOutboundTag || tag == "Spain-Madrid-VLESS-gRPC" {
 			continue
 		}
 		serverTags = append(serverTags, tag)
 		outboundNodes = append(outboundNodes, p.Outbound)
 	}
+
+	// Добавляем резервный gRPC outbound:
+	// Присутствует в outboundNodes и selectorOutbounds для ручного выбора.
+	// НЕ ДОБАВЛЯЕТСЯ в serverTags / urltestOutbound (strict standby).
+	grpcStandby := StandbySpainGRPCOutbound()
+	grpcTag := grpcStandby["tag"].(string)
+	outboundNodes = append(outboundNodes, grpcStandby)
 
 	// Создаем группу автоматического выбора urltest ("auto")
 	urltestOutbound := map[string]any{
@@ -142,13 +195,14 @@ func BuildConfig(paths *AppPaths, activeProfile *profile.Item, allProfiles []pro
 		"tag":       AutoOutboundTag,
 		"outbounds": serverTags,
 		"url":       "http://www.gstatic.com/generate_204",
-		"interval":  "1m",
+		"interval":  "30s",
 		"tolerance": 100,
 	}
 
-	// Сборка селектора: сначала "auto", затем конкретные узлы, затем "direct" (пауза)
+	// Сборка селектора: сначала "auto", затем конкретные узлы (включая gRPC), затем "direct" (пауза)
 	selectorOutbounds := []string{AutoOutboundTag}
 	selectorOutbounds = append(selectorOutbounds, serverTags...)
+	selectorOutbounds = append(selectorOutbounds, grpcTag)
 	selectorOutbounds = append(selectorOutbounds, "direct")
 
 	// Дефолтная нода селектора: если пользователь явно выбрал профиль — ставим его, иначе по умолчанию "auto"

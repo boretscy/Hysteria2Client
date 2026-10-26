@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"runtime"
 	"sync"
 	"time"
 
@@ -28,6 +29,10 @@ type Controller struct {
 	clashClient    *ClashClient
 	state          State
 	lastActiveNode string // Запоминает узел перед уходом в паузу
+
+	// Watchdog переменные
+	deadSince      time.Time
+	lastRestartAt  time.Time
 }
 
 // NewController создает контроллер.
@@ -54,6 +59,8 @@ func (c *Controller) GetState() State {
 }
 
 // CheckStatus опрашивает sing-box и обновляет статус.
+// Включает watchdog: если API демона недоступен более 15 секунд, автоматически
+// инициирует перезапуск системной службы (с cooldown защитой).
 func (c *Controller) CheckStatus(ctx context.Context) State {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -61,13 +68,30 @@ func (c *Controller) CheckStatus(ctx context.Context) State {
 	alive := c.clashClient.IsAlive(ctx)
 	c.state.IsAlive = alive
 
+	now := time.Now()
 	if alive {
-		now, err := c.clashClient.GetActiveOutbound(ctx, "proxy")
+		c.deadSince = time.Time{} // сбрасываем счетчик недоступности
+		node, err := c.clashClient.GetActiveOutbound(ctx, "proxy")
 		if err == nil {
-			c.state.ActiveNode = now
-			c.state.TunnelEnabled = (now != "direct")
-			if now != "direct" {
-				c.lastActiveNode = now
+			c.state.ActiveNode = node
+			c.state.TunnelEnabled = (node != "direct")
+			if node != "direct" {
+				c.lastActiveNode = node
+			}
+		}
+	} else {
+		// Служба не отвечает
+		if c.deadSince.IsZero() {
+			c.deadSince = now
+			c.logger.Warn("sing-box daemon is not responding to REST API, starting watchdog timer")
+		} else {
+			deadDuration := now.Sub(c.deadSince)
+			// Если API недоступен > 15 секунд и с прошлого рестарта прошло > 30 секунд (cooldown)
+			if deadDuration >= 15*time.Second && (c.lastRestartAt.IsZero() || now.Sub(c.lastRestartAt) >= 30*time.Second) {
+				c.logger.Error("watchdog: sing-box daemon unreachable for >15s, triggering automatic service restart",
+					slog.Duration("unreachable_for", deadDuration))
+				c.lastRestartAt = now
+				go c.restartDaemonInternal()
 			}
 		}
 	}
@@ -135,7 +159,7 @@ func (c *Controller) SwitchToAuto(ctx context.Context) error {
 		if syncErr := c.SyncConfigFile(); syncErr != nil {
 			return syncErr
 		}
-		_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
+		c.restartDaemonInternal()
 		time.Sleep(1 * time.Second)
 
 		retryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -181,7 +205,7 @@ func (c *Controller) SwitchProfile(ctx context.Context, id string) error {
 		if syncErr := c.SyncConfigFile(); syncErr != nil {
 			return syncErr
 		}
-		_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
+		c.restartDaemonInternal()
 		time.Sleep(1 * time.Second)
 
 		// Повторяем выбор
@@ -234,12 +258,40 @@ func (c *Controller) SyncConfigFile() error {
 	return config.WriteConfigAtomic(c.paths.SingboxConfig, data)
 }
 
+// restartDaemonInternal перезапускает системный демон/службу кроссплатформенно.
+func (c *Controller) restartDaemonInternal() {
+	if runtime.GOOS == "windows" {
+		// На Windows: служба перезапускается нативно без UAC благодаря правам DACL (sc sdset)
+		c.logger.Info("restarting sing-box Windows service via sc.exe")
+		cmdStop := exec.Command("sc.exe", "stop", "sing-box")
+		if out, err := cmdStop.CombinedOutput(); err != nil {
+			c.logger.Warn("sc.exe stop output", slog.String("output", string(out)), slog.Any("error", err))
+		}
+		time.Sleep(1 * time.Second)
+		cmdStart := exec.Command("sc.exe", "start", "sing-box")
+		if out, err := cmdStart.CombinedOutput(); err != nil {
+			c.logger.Warn("sc.exe start output", slog.String("output", string(out)), slog.Any("error", err))
+		} else {
+			c.logger.Info("sing-box Windows service restart command issued successfully")
+		}
+	} else {
+		// На macOS: launchctl kickstart
+		c.logger.Info("restarting sing-box macOS daemon via launchctl kickstart")
+		cmd := exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			c.logger.Warn("launchctl kickstart output", slog.String("output", string(out)), slog.Any("error", err))
+		} else {
+			c.logger.Info("launchctl kickstart executed successfully")
+		}
+	}
+}
+
 // ReloadDaemon перезагружает демон sing-box.
 func (c *Controller) ReloadDaemon() error {
 	if err := c.SyncConfigFile(); err != nil {
 		return err
 	}
-	_ = exec.Command("launchctl", "kickstart", "-k", "system/com.singbox.tunnel").Run()
+	c.restartDaemonInternal()
 	return nil
 }
 

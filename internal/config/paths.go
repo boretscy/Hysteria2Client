@@ -30,29 +30,38 @@ func ResolvePaths() (*AppPaths, error) {
 
 	// Рабочая директория утилиты в App Support (macOS) или AppData/Roaming (Windows)
 	var baseDir string
+	var singboxDir string
 	var singboxConfig string
 	var geoIPPath string
 	var geoSitePath string
 
 	switch runtime.GOOS {
 	case "darwin":
-		singboxDir := filepath.Join(homeDir, "Library", "Application Support", "singbox-tun")
+		singboxDir = filepath.Join(homeDir, "Library", "Application Support", "singbox-tun")
 		baseDir = filepath.Join(homeDir, "Library", "Application Support", "Hysteria2Client")
 		singboxConfig = filepath.Join(singboxDir, "config.json")
 		geoIPPath = filepath.Join(singboxDir, "rule-set", "geoip-ru.srs")
 		geoSitePath = filepath.Join(singboxDir, "rule-set", "geosite-category-ru.srs")
 	case "windows":
+		// Служба Windows работает под SYSTEM и читает конфиг из %ProgramData%\singbox-tun
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = "C:\\ProgramData"
+		}
+		singboxDir = filepath.Join(programData, "singbox-tun")
+
+		// Пользовательские настройки, профили и списки исключений в %APPDATA%\Hysteria2Client
 		appData := os.Getenv("APPDATA")
 		if appData == "" {
 			appData = filepath.Join(homeDir, "AppData", "Roaming")
 		}
-		singboxDir := filepath.Join(appData, "singbox-tun")
 		baseDir = filepath.Join(appData, "Hysteria2Client")
+
 		singboxConfig = filepath.Join(singboxDir, "config.json")
 		geoIPPath = filepath.Join(singboxDir, "rule-set", "geoip-ru.srs")
 		geoSitePath = filepath.Join(singboxDir, "rule-set", "geosite-category-ru.srs")
 	default:
-		singboxDir := filepath.Join(homeDir, ".config", "singbox-tun")
+		singboxDir = filepath.Join(homeDir, ".config", "singbox-tun")
 		baseDir = filepath.Join(homeDir, ".config", "Hysteria2Client")
 		singboxConfig = filepath.Join(singboxDir, "config.json")
 		geoIPPath = filepath.Join(singboxDir, "rule-set", "geoip-ru.srs")
@@ -63,12 +72,18 @@ func ResolvePaths() (*AppPaths, error) {
 	profilesDir := filepath.Join(baseDir, "profiles")
 	_ = os.MkdirAll(profilesDir, 0o755)
 
+	secretFile := filepath.Join(baseDir, "clash_secret.txt")
+	if runtime.GOOS == "windows" {
+		// На Windows единый секрет лежит рядом с config.json в ProgramData
+		secretFile = filepath.Join(singboxDir, "clash_secret.txt")
+	}
+
 	return &AppPaths{
 		BaseDir:       baseDir,
 		ProfilesDir:   profilesDir,
 		DirectDomains: filepath.Join(baseDir, "direct_domains.txt"),
 		ProxyDomains:  filepath.Join(baseDir, "proxy_domains.txt"),
-		SecretFile:    filepath.Join(baseDir, "clash_secret.txt"),
+		SecretFile:    secretFile,
 		SingboxConfig: singboxConfig,
 		GeoIPPath:     geoIPPath,
 		GeoSitePath:   geoSitePath,

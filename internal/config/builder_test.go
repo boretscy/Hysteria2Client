@@ -106,12 +106,55 @@ func TestBuildConfig(t *testing.T) {
 		t.Errorf("expected selector first item to be 'auto', got %v", selList)
 	}
 
+	// Проверяем, что Spain-Madrid-VLESS-gRPC присутствует в селекторе
+	foundGRPCInSelector := false
+	for _, item := range selList {
+		if item == "Spain-Madrid-VLESS-gRPC" {
+			foundGRPCInSelector = true
+			break
+		}
+	}
+	if !foundGRPCInSelector {
+		t.Errorf("expected Spain-Madrid-VLESS-gRPC in selector outbounds: %v", selList)
+	}
+
 	autoOutbound := outbounds[1].(map[string]any)
 	if autoOutbound["type"] != "urltest" || autoOutbound["tag"] != "auto" {
 		t.Errorf("invalid auto urltest outbound: %v", autoOutbound)
 	}
 	if autoOutbound["tolerance"] != float64(100) {
 		t.Errorf("expected tolerance=100, got %v", autoOutbound["tolerance"])
+	}
+
+	// Проверяем, что gRPC НЕ попал в auto urltest
+	autoList := autoOutbound["outbounds"].([]any)
+	for _, item := range autoList {
+		if item == "Spain-Madrid-VLESS-gRPC" {
+			t.Errorf("Spain-Madrid-VLESS-gRPC MUST NOT be in auto urltest group: %v", autoList)
+		}
+	}
+
+	// Проверяем наличие gRPC outbound ноды с транспортом grpc
+	foundGRPCOutbound := false
+	for _, o := range outbounds {
+		oMap, ok := o.(map[string]any)
+		if !ok {
+			continue
+		}
+		if oMap["tag"] == "Spain-Madrid-VLESS-gRPC" {
+			foundGRPCOutbound = true
+			if oMap["type"] != "vless" {
+				t.Errorf("expected type=vless for gRPC node, got %v", oMap["type"])
+			}
+			tr, ok := oMap["transport"].(map[string]any)
+			if !ok || tr["type"] != "grpc" || tr["service_name"] != "grpc-vpn-tunnel" {
+				t.Errorf("invalid transport for gRPC node: %v", tr)
+			}
+			break
+		}
+	}
+	if !foundGRPCOutbound {
+		t.Errorf("Spain-Madrid-VLESS-gRPC outbound node not found in outbounds")
 	}
 
 	// Проверяем корректность IP-маршрутов в route
